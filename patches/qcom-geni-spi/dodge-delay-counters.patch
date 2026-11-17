@@ -1,0 +1,43 @@
+diff --git a/GeniSpi.c b/GeniSpi.c
+index ec6705c..42ee175 100644
+--- a/GeniSpi.c
++++ b/GeniSpi.c
+@@ -1,6 +1,8 @@
+ // SPDX-License-Identifier: BSD-2-Clause-Patent
+ #include "GeniSpi.h"
+ 
++volatile unsigned int geniSpiDelayRaw = 0xFFFFFFFFu;
++
+ static uint32_t rd(struct geni_spi *s, uint32_t reg) { return s->se.rd(s->se.ctx, reg); }
+ static void wr(struct geni_spi *s, uint32_t reg, uint32_t v) { s->se.wr(s->se.ctx, reg, v); }
+ static void rmw_set(struct geni_spi *s, uint32_t reg, uint32_t bits) { wr(s, reg, rd(s, reg) | bits); }
+@@ -105,6 +107,10 @@ int geni_spi_init(struct geni_spi *s) {
+     wr(s, SE_SPI_CPOL, 0);
+     wr(s, SE_SPI_DEMUX_OUTPUT_INV, 0);
+     wr(s, SE_SPI_TRANS_CFG, rd(s, SE_SPI_TRANS_CFG) & ~GENI_CS_TOGGLE);   // chip select is never driven manually
++    // The OnePlus 13T Android baseline uses cs_clk_delay=50 and inter_words_delay=0.
++    wr(s, GENI_SE_SPI_DELAY_COUNTERS, GENI_SPI_CLK_DELAY(GENI_SPI_CS_CLK_DELAY) | GENI_SPI_CS_DELAY(0) |
++        GENI_SPI_INTER_WORDS(GENI_SPI_INTER_WORDS_DELAY) | GENI_SPI_CS_TO_CLK(0));
++    geniSpiDelayRaw = rd(s, GENI_SE_SPI_DELAY_COUNTERS);
+     s->cur_bpw = 0;
+     s->cur_speed_hz = 0;
+     s->last_mode = 0;
+diff --git a/GeniSpi.h b/GeniSpi.h
+index f2fdcc9..460c7ef 100644
+--- a/GeniSpi.h
++++ b/GeniSpi.h
+@@ -30,6 +30,14 @@
+ #define SE_SPI_WORD_LEN 0x268
+ #define SE_SPI_TX_TRANS_LEN 0x26c
+ #define SE_SPI_RX_TRANS_LEN 0x270
++#define GENI_SE_SPI_DELAY_COUNTERS 0x27C
++#define GENI_SPI_CLK_DELAY(v)      ((v) & 0xFF)
++#define GENI_SPI_CS_DELAY(v)       (((v) & 0xFF) << 8)
++#define GENI_SPI_INTER_WORDS(v)    (((v) & 0xFF) << 16)
++#define GENI_SPI_CS_TO_CLK(v)      (((v) & 0xFF) << 24)
++#define GENI_SPI_CS_CLK_DELAY      50
++#define GENI_SPI_INTER_WORDS_DELAY 0
++extern volatile unsigned int geniSpiDelayRaw;
+ #define SE_GENI_M_CMD0 0x600
+ #define SE_GENI_M_CMD_CTRL_REG 0x604
+ #define SE_GENI_M_IRQ_STATUS 0x610

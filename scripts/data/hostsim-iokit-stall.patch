@@ -1,0 +1,121 @@
+diff --git a/tests/hostsim/host_iokit_shim.cpp b/tests/hostsim/host_iokit_shim.cpp
+--- a/tests/hostsim/host_iokit_shim.cpp
++++ b/tests/hostsim/host_iokit_shim.cpp
+@@ -1,14 +1,91 @@
+ /* SPDX-License-Identifier: MIT */
+ /* IOKit entry points the Turnip darwin backend uses, answered by the host copy of the kernel stack; every other service is the system's. Inserted with DYLD_INSERT_LIBRARIES
+  * and redirected by dyld interposing. Never built for the tablet. */
+-#include <IOKit/IOKitLib.h>
+-#include <mach/mach.h>
++#include <atomic>
++#include <cerrno>
+ #include <cstdint>
+ #include <cstdlib>
+ #include <cstring>
+ #include <cstdio>
++#include <time.h>
+ #include <unistd.h>
+ static bool trace(){static int t=-1;if(t<0)t=getenv("HOSTSIM_TRACE")?1:0;return t;}
+ 
++static uint64_t hostsimMonotonicNs(const timespec &value) {
++    return static_cast<uint64_t>(value.tv_sec) * 1000000000ull + static_cast<uint64_t>(value.tv_nsec);
++}
++
++/* Keep the first BoAlloc blocked for a monotonic deadline. A signal may interrupt sleep(), so log each return and retry for the
++ * unslept duration instead of consuming the one-shot injection early. */
++static bool hostsimStall(uint32_t method, const char *route) {
++    if (method != 2) return false;
++    const char *value = getenv("HOSTSIM_STALL");
++    if (!value || !*value) return false;
++    for (const char *digit = value; *digit; ++digit) {
++        if (*digit < '0' || *digit > '9') {
++            fprintf(stderr,"shim: stall method=%u route=%s requested=%s rejected\n",method,route,value);
++            return false;
++        }
++    }
++    char *end = nullptr;
++    errno = 0;
++    const unsigned long requested = strtoul(value,&end,10);
++    if (errno || end == value || *end || !requested || requested > 0xfffffffful) {
++        fprintf(stderr,"shim: stall method=%u route=%s requested=%s rejected\n",method,route,value);
++        return false;
++    }
++    static std::atomic<bool> claimed(false);
++    if (claimed.exchange(true,std::memory_order_acq_rel)) return false;
++
++    timespec start = {};
++    if (clock_gettime(CLOCK_MONOTONIC,&start)) {
++        fprintf(stderr,"shim: stall method=%u route=%s requested_ms=%llu result=clock_error\n",
++                method,route,(unsigned long long)requested * 1000ull);
++        return false;
++    }
++    const uint64_t requestedMs = static_cast<uint64_t>(requested) * 1000ull;
++    const uint64_t deadline = hostsimMonotonicNs(start) + requestedMs * 1000000ull;
++    fprintf(stderr,"shim: stall method=%u route=%s requested_ms=%llu result=begin\n",method,route,
++            (unsigned long long)requestedMs);
++    unsigned attempts = 0, interrupts = 0;
++    for (;;) {
++        timespec now = {};
++        if (clock_gettime(CLOCK_MONOTONIC,&now)) {
++            fprintf(stderr,"shim: stall method=%u route=%s requested_ms=%llu result=clock_error\n",
++                    method,route,(unsigned long long)requestedMs);
++            return false;
++        }
++        const uint64_t nowNs = hostsimMonotonicNs(now);
++        if (nowNs >= deadline) break;
++        const uint64_t remainingNs = deadline - nowNs;
++        const unsigned seconds = static_cast<unsigned>((remainingNs + 999999999ull) / 1000000000ull);
++        errno = 0;
++        const unsigned left = sleep(seconds);
++        const int sleepError = errno;
++        timespec after = {};
++        if (clock_gettime(CLOCK_MONOTONIC,&after)) {
++            fprintf(stderr,"shim: stall method=%u route=%s requested_ms=%llu result=clock_error\n",
++                    method,route,(unsigned long long)requestedMs);
++            return false;
++        }
++        const uint64_t elapsedMs = (hostsimMonotonicNs(after) - hostsimMonotonicNs(start)) / 1000000ull;
++        ++attempts;
++        if (left || sleepError == EINTR) ++interrupts;
++        fprintf(stderr,"shim: stall method=%u route=%s attempt=%u requested_ms=%llu returned_s=%u errno=%d (%s) "
++                "interrupted=%u elapsed_ms=%llu\n",method,route,attempts,(unsigned long long)requestedMs,left,
++                sleepError,strerror(sleepError),left || sleepError == EINTR ? 1u : 0u,(unsigned long long)elapsedMs);
++    }
++    timespec finish = {};
++    if (clock_gettime(CLOCK_MONOTONIC,&finish)) return false;
++    const uint64_t elapsedMs = (hostsimMonotonicNs(finish) - hostsimMonotonicNs(start)) / 1000000ull;
++    fprintf(stderr,"shim: stall method=%u route=%s requested_ms=%llu interrupts=%u result=complete elapsed_ms=%llu\n",
++            method,route,(unsigned long long)requestedMs,interrupts,(unsigned long long)elapsedMs);
++    return true;
++}
++
++#if !defined(HOSTSIM_IOKIT_STALL_TEST)
++#include <IOKit/IOKitLib.h>
++#include <mach/mach.h>
++
+ extern "C" {
+ int host_gpu_open();
+@@ -72,9 +149,7 @@ static kern_return_t shim_IOConnectCallStructMethod(mach_port_t connect,uint32_t
+         const uint32_t *header=static_cast<const uint32_t *>(in);
+         if(!in || in_size<8 || header[0]!=kTunnelMagic)return kIOReturnBadArgument;
+         if(header[1]==0xffffffffu)return KERN_SUCCESS;
+-        /* HOSTSIM_STALL=<seconds>: the first BoAlloc (the first call vkCreateDevice makes) blocks that long, to exercise the plugin's watchdog. */
+-        static bool stalled=false;
+-        if(header[1]==2 && !stalled && getenv("HOSTSIM_STALL")) {stalled=true;sleep((unsigned)atoi(getenv("HOSTSIM_STALL")));}
++        hostsimStall(header[1],"tunnel");
+         const int status=host_gpu_call(header[1],static_cast<const uint8_t *>(in)+8,in_size-8,out,out_size?*out_size:0);
+         if(trace())fprintf(stderr,"shim: method %u first word 0x%llx -> %d\n",header[1],in_size>=16?(unsigned long long)*reinterpret_cast<const uint64_t *>(static_cast<const uint8_t *>(in)+8):0ull,status);
+         if(trace() && status)fprintf(stderr,"shim: method %u (in %zu, out %zu) -> fixture status %d\n",header[1],in_size-8,out_size?*out_size:0,status);
+@@ -83,5 +158,6 @@ static kern_return_t shim_IOConnectCallStructMethod(mach_port_t connect,uint32_t
+         return translate(status);
+     }
++    hostsimStall(selector,"direct");
+     return translate(host_gpu_call(selector,in,in_size,out,out_size?*out_size:0));
+ }
+ static kern_return_t shim_IOConnectMapMemory64(io_connect_t connect,uint32_t type,task_port_t task,mach_vm_address_t *address,mach_vm_size_t *size,
+@@ -116,3 +192,5 @@ extern "C" {
+ volatile uint32_t native_gpu_dcvs[15];
+ int PE_parse_boot_argn(const char *, void *, int) {return 0;}
+ }
++
++#endif

@@ -1,0 +1,183 @@
+diff --git a/GpuScanoutClient.h b/GpuScanoutClient.h
+index ccdac60..7aa30a0 100644
+--- a/GpuScanoutClient.h
++++ b/GpuScanoutClient.h
+@@ -51,7 +51,7 @@ public:
+         note(0x6710);
+         int status = transport_.call(transport_.context, NGP_METHOD_MODE, nullptr, 0, &mode, sizeof mode);
+         note(0x6711);
+-        if (status || mode.version != NGP_VERSION || mode.format != NGP_BGRX8888 || !mode.width || !mode.height ||
++        if (status || mode.version != NGP_VERSION || (mode.format != NGP_BGRX8888 && mode.format != NGP_BGRX2101010) || !mode.width || !mode.height ||
+             mode.stride < mode.width * 4 || mode.bytes < mode.stride * mode.height) return fail(2, status);
+         const size_t page = (size_t)getpagesize();
+         uint64_t address = 0, length = 0;
+diff --git a/GpuScanoutPresenter.h b/GpuScanoutPresenter.h
+index 541fad8..4da7bd4 100644
+--- a/GpuScanoutPresenter.h
++++ b/GpuScanoutPresenter.h
+@@ -6,7 +6,9 @@
+ // codes (NativeHalfCodes.h), so the bytes match its CPU path. A BGRA frame goes through the kernel scanout_opaque, which copies it with
+ // alpha 0xff, as the half-float conversion stores it: the display blends the scanout by its per-pixel alpha (SSPP SRC_FORMAT 0x237ff),
+ // and the compositor's framebuffer alpha is not opacity (translucent tinted blocks around Liquid Glass, i23c80d087); a device without
+-// the kernel blits it. No CPU touches a pixel; there is no staging copy and no software fallback here. Used through the public Metal API, on any device (the native frontend on the tablet, the Mac's device for the host check).
++// the kernel blits it. A 10-bit XRGB2101010 frame goes through scanout_b3a8, whose level formula is bit-for-bit identical to the kernel
++// CPU path's native_legacy_b3a8_level10(). No CPU touches a pixel; there is no staging copy and no software fallback here. Used through
++// the public Metal API, on any device (the native frontend on the tablet, the Mac's device for the host check).
+ #pragma once
+ #import <Metal/Metal.h>
+ #include <unistd.h>
+@@ -41,7 +43,7 @@ struct Frame {
+     size_t stride;
+     uint32_t width, height;
+     uint32_t mapping; // the kernel's id for this mapping of the surface (0: none, imported for this frame only)
+-    uint32_t format;  // NGP_BGRX8888, NGP_RGBA16F_LINEAR or NGP_RGBA16F_ENCODED
++    uint32_t format;  // NGP_BGRX8888, NGP_BGRX2101010, NGP_RGBA16F_LINEAR or NGP_RGBA16F_ENCODED
+     uint64_t sequence=0;
+ };
+ 
+@@ -67,6 +69,7 @@ public:
+         timing_={};began_=nowUs();
+         if (!ready()) return kBadScanout;
+         if (frame.format == NGP_RGBA16F_LINEAR || frame.format == NGP_RGBA16F_ENCODED) return convert(frame);
++        if (frame.format == NGP_BGRX2101010) return b3a8(frame);
+         if (frame.format != NGP_BGRX8888) return kBadFrame;
+         const size_t page = (size_t)getpagesize(), row = (size_t)frame.width * 4;
+         if (!frame.base || ((uintptr_t)frame.base & (page - 1)) || !frame.bytes || (frame.bytes & (page - 1)) ||
+@@ -146,6 +149,36 @@ public:
+         uint32_t spans[4]={0,frame.height,frame.height,frame.height};
+ #ifdef NGP_OVERLAY_API
+         ngp_visible_rows(frame.height,{scanout_.overlayFirst,scanout_.overlayRows},spans);
++#endif
++        for(unsigned part=0;part<2;++part) {
++            const uint32_t first=spans[2*part],end=spans[2*part+1];
++            if(end<=first)continue;
++            const uint32_t params[4] = {frame.width, end-first, (uint32_t)(frame.stride / 4), (uint32_t)(scanout_.stride / 4)};
++            [encoder setBuffer:source offset:first*frame.stride atIndex:0];
++            [encoder setBuffer:target_ offset:first*scanout_.stride atIndex:1];
++            [encoder setBytes:params length:sizeof params atIndex:3];
++            [encoder dispatchThreadgroups:MTLSizeMake((frame.width + 15) / 16, (end-first + 7) / 8, 1)
++                    threadsPerThreadgroup:MTLSizeMake(16, 8, 1)];
++        }
++        [encoder endEncoding];
++        return finish(commands,frame);
++    }
++    // A 10-bit XRGB2101010 frame: one thread per pixel, 16 x 8 threads a group (the kernel skips threads past the edges).
++    Result b3a8(const Frame &frame) {
++        const size_t page = (size_t)getpagesize(), row = (size_t)frame.width * 4;
++        if (!frame.base || ((uintptr_t)frame.base & (page - 1)) || !frame.bytes || (frame.bytes & (page - 1)) ||
++            frame.width != scanout_.width || frame.height != scanout_.height || frame.stride < row || (frame.stride & 3) ||
++            (scanout_.stride & 3) || frame.stride * (frame.height - 1) + row > frame.bytes) return kBadFrame;
++        if (!pipeline(b3a8_, b3a8Failed_, @"scanout_b3a8")) return kNoResource;
++        id<MTLBuffer> source = sourceFor(frame);
++        if (!source) return kNoResource;
++        id<MTLCommandBuffer> commands = [queue_ commandBuffer];
++        id<MTLComputeCommandEncoder> encoder = commands ? [commands computeCommandEncoder] : nil;
++        if (!encoder) return kNoResource;
++        [encoder setComputePipelineState:b3a8_];
++        uint32_t spans[4]={0,frame.height,frame.height,frame.height};
++#ifdef NGP_OVERLAY_API
++        ngp_visible_rows(frame.height,{scanout_.overlayFirst,scanout_.overlayRows},spans);
+ #endif
+         for(unsigned part=0;part<2;++part) {
+             const uint32_t first=spans[2*part],end=spans[2*part+1];
+@@ -233,6 +266,8 @@ private:
+     id<MTLBuffer> target_;
+     id<MTLComputePipelineState> convert_ = nil, opaque_ = nil;
+     bool convertFailed_ = false, opaqueFailed_ = false;
++    id<MTLComputePipelineState> b3a8_ = nil;
++    bool b3a8Failed_ = false;
+     id<MTLBuffer> tables_[2] = {nil, nil};
+     Source sources_[kSources] = {};
+     uint64_t uses_ = 0;
+diff --git a/shaders/scanout_convert.ll b/shaders/scanout_convert.ll
+index 010993b..a990fb0 100644
+--- a/shaders/scanout_convert.ll
++++ b/shaders/scanout_convert.ll
+@@ -106,10 +106,80 @@ done:
+   ret void
+ }
+ 
++; scanout_b3a8: XRGB2101010 (R 29:20, G 19:10, B 9:0) rows to the scanout's BGRA rows. The compositor writes SDR into the middle of the
++; range (black 384, white 894, slope one half), the same as the driver's CPU path:
++;   level(v) = v <= 384 ? 0 : min((v - 384) >> 1, 255)
++; stored as BGRA with alpha 0xff, exactly what native_legacy_b3a8_level10() stores.
++;   kernel void scanout_b3a8(device const uint *src [[buffer(0)]], device uint *dst [[buffer(1)]], constant uint4 &p [[buffer(3)]],
++;                            uint2 gid [[thread_position_in_grid]])
++; p: width, height, source row pitch in words, destination row pitch in words.
++define void @scanout_b3a8(ptr addrspace(1) noundef readonly "air-buffer-no-alias" %src, ptr addrspace(1) noundef "air-buffer-no-alias" %dst, ptr addrspace(2) noundef readonly align 16 dereferenceable(16) "air-buffer-no-alias" %p, <2 x i32> noundef %gid) local_unnamed_addr #0 {
++entry:
++  %w = load i32, ptr addrspace(2) %p, align 16
++  %ph = getelementptr inbounds i32, ptr addrspace(2) %p, i64 1
++  %h = load i32, ptr addrspace(2) %ph, align 4
++  %pss = getelementptr inbounds i32, ptr addrspace(2) %p, i64 2
++  %ss = load i32, ptr addrspace(2) %pss, align 8
++  %pds = getelementptr inbounds i32, ptr addrspace(2) %p, i64 3
++  %ds = load i32, ptr addrspace(2) %pds, align 4
++  %x = extractelement <2 x i32> %gid, i64 0
++  %y = extractelement <2 x i32> %gid, i64 1
++  %inx = icmp ult i32 %x, %w
++  %iny = icmp ult i32 %y, %h
++  %in = and i1 %inx, %iny
++  br i1 %in, label %body, label %done
++
++body:
++  %x64 = zext i32 %x to i64
++  %y64 = zext i32 %y to i64
++  %ss64 = zext i32 %ss to i64
++  %srow = mul i64 %y64, %ss64
++  %si = add i64 %srow, %x64
++  %sp = getelementptr inbounds i32, ptr addrspace(1) %src, i64 %si
++  %v = load i32, ptr addrspace(1) %sp, align 4
++  %rv = lshr i32 %v, 20
++  %r = and i32 %rv, 1023
++  %gv = lshr i32 %v, 10
++  %g = and i32 %gv, 1023
++  %b = and i32 %v, 1023
++  %rblack = icmp ule i32 %r, 384
++  %rs0 = sub i32 %r, 384
++  %rt = select i1 %rblack, i32 0, i32 %rs0
++  %rs1 = lshr i32 %rt, 1
++  %rover = icmp ugt i32 %rs1, 255
++  %rl = select i1 %rover, i32 255, i32 %rs1
++  %gblack = icmp ule i32 %g, 384
++  %gs0 = sub i32 %g, 384
++  %gt = select i1 %gblack, i32 0, i32 %gs0
++  %gs1 = lshr i32 %gt, 1
++  %gover = icmp ugt i32 %gs1, 255
++  %gl = select i1 %gover, i32 255, i32 %gs1
++  %bblack = icmp ule i32 %b, 384
++  %bs0 = sub i32 %b, 384
++  %bt = select i1 %bblack, i32 0, i32 %bs0
++  %bs1 = lshr i32 %bt, 1
++  %bover = icmp ugt i32 %bs1, 255
++  %bl = select i1 %bover, i32 255, i32 %bs1
++  %rshift = shl i32 %rl, 16
++  %gshift = shl i32 %gl, 8
++  %rg = or i32 %rshift, %gshift
++  %rgb = or i32 %rg, %bl
++  %px = or i32 %rgb, -16777216
++  %ds64 = zext i32 %ds to i64
++  %drow = mul i64 %y64, %ds64
++  %di = add i64 %drow, %x64
++  %dp = getelementptr inbounds i32, ptr addrspace(1) %dst, i64 %di
++  store i32 %px, ptr addrspace(1) %dp, align 4
++  br label %done
++
++done:
++  ret void
++}
++
+ attributes #0 = { mustprogress nofree norecurse nosync nounwind willreturn "frame-pointer"="all" "min-legal-vector-width"="0" "no-builtins" "no-trapping-math"="true" "stack-protector-buffer-size"="8" }
+ 
+ !llvm.module.flags = !{!0, !1, !2, !3, !4, !5, !6, !7, !8}
+-!air.kernel = !{!9, !22}
++!air.kernel = !{!9, !22, !26}
+ !air.compile_options = !{!17, !18}
+ !llvm.ident = !{!19}
+ !air.version = !{!20}
+@@ -141,3 +211,5 @@ attributes #0 = { mustprogress nofree norecurse nosync nounwind willreturn "fram
+ !23 = !{!12, !13, !25, !24}
+ !24 = !{i32 3, !"air.thread_position_in_grid", !"air.arg_type_name", !"uint2", !"air.arg_name", !"gid"}
+ !25 = !{i32 2, !"air.buffer", !"air.buffer_size", i32 16, !"air.location_index", i32 3, i32 1, !"air.read", !"air.address_space", i32 2, !"air.arg_type_size", i32 16, !"air.arg_type_align_size", i32 16, !"air.arg_type_name", !"uint4", !"air.arg_name", !"p"}
++!26 = !{ptr @scanout_b3a8, !10, !27}
++!27 = !{!12, !13, !25, !24}

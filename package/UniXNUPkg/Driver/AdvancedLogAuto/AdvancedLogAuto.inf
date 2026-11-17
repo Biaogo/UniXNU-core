@@ -1,0 +1,44 @@
+## @file
+#  Early-boot QR renderer for the Advanced Logger log.
+#
+#  The driver waits briefly for the Advanced Logger and GOP, captures the log
+#  once, then alternates QR frames from the tail and head of the log without a
+#  menu or input dependency.
+#
+#  Copyright (c) 2026, UniXNU contributors. All rights reserved.
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+##
+
+[Defines]
+  INF_VERSION    = 0x00010019
+  BASE_NAME      = AdvancedLogAuto
+  FILE_GUID      = 7C21B3E4-4A55-4C1E-9C0B-2D6E8F1A3B57
+  MODULE_TYPE    = DXE_DRIVER
+  VERSION_STRING = 0.1
+  ENTRY_POINT    = AdvancedLogAutoEntry
+
+[Sources]
+  AdvancedLogAuto.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+  AdvLoggerPkg/AdvLoggerPkg.dec
+  MsGraphicsPkg/MsGraphicsPkg.dec
+  UniXNUPkg/UniXNUPkg.dec
+
+[LibraryClasses]
+  AdvancedLoggerAccessLib
+  BaseLib
+  BaseMemoryLib
+  DebugLib
+  MemoryAllocationLib
+  QrEncoderLib
+  UefiBootServicesTableLib
+  UefiDriverEntryPoint
+  UefiLib
+
+[Protocols]
+  gAdvancedLoggerProtocolGuid       ## CONSUMES
+
+[Depex]
+  gAdvancedLoggerProtocolGuid

@@ -1,0 +1,54 @@
+{
+  "schema": 1,
+  "source": {
+    "url": "https://updates.cdn-apple.com/2025SpringFCS/fullrestores/122-77166/DCA6CFE8-90E9-4B92-880D-3DE171798E40/iPad_Pro_HFR_17.7.11_21H461_Restore.ipsw",
+    "archive_name": "iPad_Pro_HFR_17.7.11_21H461_Restore.ipsw",
+    "bytes": 6835124840,
+    "sha256": "c84ad24b6981a859eec499b1802be9ac593acfd3dc0a185a76d06e4d767a1451",
+    "public": true
+  },
+  "build_manifest_entry": "BuildManifest.plist",
+  "build": {
+    "product_version": "17.7.11",
+    "product_build_version": "21H461",
+    "supported_product_types": [
+      "iPad7,1",
+      "iPad7,2",
+      "iPad7,3",
+      "iPad7,4"
+    ],
+    "device": "iPad7,1",
+    "device_class": "j120ap",
+    "restore_behavior": "Erase"
+  },
+  "images": {
+    "os": {
+      "manifest_key": "OS",
+      "filename": "044-76040-038.dmg",
+      "bytes": 5157406069,
+      "kind": "udif"
+    },
+    "cryptex": {
+      "manifest_key": "Cryptex1,SystemOS",
+      "filename": "044-76034-038.dmg",
+      "bytes": 3303014400,
+      "kind": "raw-apfs"
+    }
+  },
+  "generator": {
+    "target": "ios",
+    "gpu": "a830",
+    "jobs": 2,
+    "os_build": "21H461",
+    "prime_list": "build/prime-list.txt",
+    "output": "build/dodge.m2vpack",
+    "work": "build/pipeline-cache",
+    "timeout_seconds": 10800
+  },
+  "timeouts": {
+    "download_seconds": 3600,
+    "extract_seconds": 3600,
+    "mount_seconds": 300,
+    "detach_seconds": 120
+  }
+}

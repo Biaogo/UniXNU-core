@@ -1,0 +1,59 @@
+{
+  "format": 1,
+  "purpose": "explicit-member identity for the eight MentalHealthUI bindings. SHA, file order, and stage only.",
+  "outer_sha256": "75e212608197e7f260417152d681f71391f852212a1df6ba3373d16056c4c2df",
+  "outer_bytes": 768416,
+  "library_path": "/System/Library/PrivateFrameworks/MentalHealthUI.framework/archive.metallib",
+  "binding_index": 1,
+  "excluded_file_orders": [2],
+  "members": [
+    {
+      "file_order": 0,
+      "member_sha256": "bd8ccf1b85ca20dd6eb01e7e46ac9aceba90408d06c7d805a77e5a3d75ca7a04",
+      "stage": "kernel",
+      "table_index": 1
+    },
+    {
+      "file_order": 1,
+      "member_sha256": "a8b0f42355d94aefaeeb69426e5b0ffa7c614542029e987aa6a90b26bc6dd86a",
+      "stage": "kernel",
+      "table_index": 1
+    },
+    {
+      "file_order": 3,
+      "member_sha256": "5b92d9d6716c3924b8770bec6b7625c4527651575d562a27131d93e5d643b91e",
+      "stage": "kernel",
+      "table_index": 1
+    },
+    {
+      "file_order": 4,
+      "member_sha256": "fa17b05f01819e3d7a212705ec5c7f69ea681b7bde735aeefd32af06c9efc1e5",
+      "stage": "kernel",
+      "table_index": 1
+    },
+    {
+      "file_order": 5,
+      "member_sha256": "9c35ad4851668624f7fccc9979d5fec2e99ac8a644a0b8c9c870dcf8d196b769",
+      "stage": "vertex",
+      "table_index": 1
+    },
+    {
+      "file_order": 6,
+      "member_sha256": "fbf3251433c28a9f9b3e1b6ca792c8e4e13839f66d1af250855d2088c68c1d26",
+      "stage": "vertex",
+      "table_index": 1
+    },
+    {
+      "file_order": 7,
+      "member_sha256": "333b94c2146178b7468e3c7435c027f5c979c2079f7faf14b751406eefd84448",
+      "stage": "vertex",
+      "table_index": 1
+    },
+    {
+      "file_order": 8,
+      "member_sha256": "ab054533555ccd34dd7db0497ad5d6a0a4840d5656058f405a45de2b1ba8af72",
+      "stage": "vertex",
+      "table_index": 1
+    }
+  ]
+}

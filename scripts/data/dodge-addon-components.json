@@ -1,0 +1,75 @@
+{
+  "format": 1,
+  "components": [
+    {
+      "name": "AdrenoMetal",
+      "path": "drivers/AdrenoMetal",
+      "repository": "https://github.com/IssacL04/AdrenoMetal",
+      "base_commit": "a4aa33c84fa6b0971374006d30edb436966a4801",
+      "base_tree": "c442798ea728e2f98f4a7aba4946e05e138682da",
+      "expected_patched_tree": "355b7a09e41c06a58e6e8155932e34f3ffc9fa35",
+      "patches": [
+        {
+          "path": "patches/adreno-metal/0001-scanout-b3a8-10bit.patch",
+          "sha256": "4c5d06171e0e106e215e2d35835ff77a97d5bf6052d5104e3a895409d0f5ba7d"
+        },
+        {
+          "path": "patches/adreno-metal/0002-turnip-watchdog-monotonic.patch",
+          "sha256": "3c7061e00efafdcf1e0dbf87142841c38a86b7d25629d7eb52f1bb3070f4eb10"
+        },
+        {
+          "path": "patches/adreno-metal/0003-explicit-member-frontend.patch",
+          "sha256": "3a7deebb2e721fb6c09daa27581683cd4ac64d9ed213857770eb61220dce1775"
+        }
+      ]
+    },
+    {
+      "name": "GopFramebuffer",
+      "path": "drivers/GopFramebuffer",
+      "repository": "https://github.com/UniXNU/GopFramebuffer",
+      "base_commit": "19ef3a75ad2c53da85b8d923553d922716fce377",
+      "base_tree": "928ffa53a1c738cf29aa22f15c626851d5781061",
+      "expected_patched_tree": "40e1898e7a674cee9976cbfa218da3d061b48a00",
+      "patches": [
+        {
+          "path": "patches/adreno-metal/0002-gop-wire-10bit-abi.patch",
+          "sha256": "ad811671082cc8c01f2d645bc059a3a8a17f8e85010351058cf2df8a4fd7108f"
+        }
+      ]
+    },
+    {
+      "name": "QcomGeniSpi",
+      "path": "drivers/QcomGeniSpi",
+      "repository": "https://github.com/UniXNU/QcomGeniSpi",
+      "base_commit": "eac47baefe6a5d2368a70351e6ad1b6361bedbe2",
+      "base_tree": "3d93597f0f4e0872dafbc9707cc8e67024af47b2",
+      "expected_patched_tree": "5f63ce1d5c5a9adf86ea20c576e041fdc03f4a85",
+      "patches": [
+        {
+          "path": "patches/qcom-geni-spi/dodge-delay-counters.patch",
+          "sha256": "07e201372dfc358e439139ec16c0e2c722eaa487563d80a5d3c091e57e2581ac"
+        }
+      ]
+    }
+  ],
+  "required_main_sources": [
+    "scripts/prime-member-policy.h",
+    "scripts/producer-member-selection.c",
+    "scripts/producer-member-selection.h",
+    "scripts/fixtures/producer-member-parser.c",
+    "scripts/test-pipeline-cache-member-priming.py",
+    "scripts/test-pipeline-cache-member-identity.py",
+    "scripts/data/dodge-explicit-members.json",
+    "scripts/explicit-member-verify.py",
+    "scripts/test-explicit-member-ci.py",
+    "scripts/pipeline_library_format.py",
+    "scripts/pipeline-cache-format.h",
+    "scripts/host_peer.py",
+    "scripts/check-turnip-darwin-host.py",
+    "scripts/make-pipeline-cache.py",
+    "scripts/ci-dodge-pipeline-cache.py",
+    "scripts/pipeline-cache-host.mm",
+    "scripts/test-host-bridge-triple.py",
+    "patches/adreno-metal/0003-explicit-member-frontend.patch"
+  ]
+}

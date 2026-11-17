@@ -1,0 +1,45 @@
+[Defines]
+  INF_VERSION                    = 0x0001001B
+  BASE_NAME                      = UniXNURamDiskDxe
+  FILE_GUID                      = 75CA63AD-FBAE-4A06-92A0-F937C671251D
+  MODULE_TYPE                    = DXE_DRIVER
+  VERSION_STRING                 = 1.0
+  ENTRY_POINT                    = UniXNURamDiskDxeEntry
+
+[Sources]
+  UniXNURamDiskDxe.c
+
+[Packages]
+  ArmPkg/ArmPkg.dec
+  MdeModulePkg/MdeModulePkg.dec
+  MdePkg/MdePkg.dec
+  UniXNUPkg/UniXNUPkg.dec
+
+[LibraryClasses]
+  BaseLib
+  BaseMemoryLib
+  DebugLib
+  FdtLib
+  HobLib
+  MemoryAllocationLib
+  PcdLib
+  PrintLib
+  UefiBootServicesTableLib
+  UefiDriverEntryPoint
+  UefiLib
+
+[FixedPcd]
+  gArmTokenSpaceGuid.PcdFdBaseAddress
+  gArmTokenSpaceGuid.PcdFdSize
+
+[Protocols]
+  gEfiBlockIoProtocolGuid                       ## PRODUCES
+  gEfiCpuArchProtocolGuid                       ## CONSUMES
+  gEfiDevicePathProtocolGuid                    ## PRODUCES
+  gEfiFirmwareVolume2ProtocolGuid               ## CONSUMES
+  gEfiLoadFile2ProtocolGuid                     ## PRODUCES
+  gEfiLoadedImageProtocolGuid                   ## CONSUMES
+  gUniXNULoaderProtocolGuid                     ## CONSUMES
+
+[Depex]
+  TRUE

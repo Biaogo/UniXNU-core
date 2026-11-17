@@ -1,0 +1,238 @@
+--- quartzcore_cache.mm
++++ quartzcore_cache.mm
+@@ -18,6 +18,7 @@
+ #include <unistd.h>
+ 
+ #define REQUIRE(x) do {if(!(x)){std::fprintf(stderr,"FAIL UI cache line %d: %s; %s\n",__LINE__,#x,nmb_last_error());return 1;}} while(0)
++static constexpr unsigned cacheCounterCount=13;
+ static NmbRenderPipelineDescriptor descriptor(NmbLibrary *library,const std::string &vertex,const std::string &fragment,bool blur) {
+     NmbRenderPipelineDescriptor d={};d.vertex=nmb_function_new(library,vertex.c_str());d.fragment=nmb_function_new(library,fragment.c_str());
+     d.colors[0].format=blur?MTLPixelFormatRGBA16Float:MTLPixelFormatBGRA8Unorm;
+@@ -47,11 +48,13 @@
+     void *loader=dlopen(path.c_str(),RTLD_NOW|RTLD_LOCAL);REQUIRE(loader);
+     auto control=reinterpret_cast<void(*)(bool,bool)>(dlsym(loader,"nmb_test_graphics_cache_control"));
+     auto counters=reinterpret_cast<void(*)(uint64_t *)>(dlsym(loader,"nmb_test_graphics_cache_counts"));
++    auto phase=reinterpret_cast<void(*)(const char *,size_t)>(dlsym(loader,"nmb_test_graphics_cache_phase"));
+     auto submitted=reinterpret_cast<unsigned(*)()>(dlsym(RTLD_DEFAULT,"host_gpu_submissions"));REQUIRE(control&&counters&&submitted);
++    REQUIRE(phase);phase("init",0);
+     const unsigned submissions=submitted();control(false,false);
+     const std::string prefix=argv[2],archivePath=prefix+".archive",cachePath=prefix+(empty?".empty":".cache");
+     NmbDevice *device=nmb_device_open(path.c_str(),cachePath.c_str());REQUIRE(device);
+-    uint64_t deviceCounts[10]={};counters(deviceCounts);control(!produce,uuid);
++    uint64_t deviceCounts[cacheCounterCount]={};counters(deviceCounts);control(!produce,uuid);
+     const char *libraryPath="/System/Library/Frameworks/QuartzCore.framework/default.metallib";
+     if(const char *override=getenv("NMB_TEST_QUARTZCORE_LIBRARY"))libraryPath=override;
+     std::ifstream input(libraryPath,std::ios::binary);REQUIRE(input);
+@@ -62,50 +65,84 @@
+     NmbLibrary *library=nmb_library_new(device,bytes.data(),bytes.size(),false);REQUIRE(library&&nmb_library_function_count(library)==167);
+     std::vector<std::string> names;for(unsigned i=0;i<167;++i){char name[256]={};REQUIRE(nmb_library_function_name(library,i,name,sizeof name)<sizeof name);names.emplace_back(name);}
+     std::vector<NmbRenderPipelineDescriptor> recipes;
++    std::vector<std::string> recipeVertices,recipeFragments;
+     for(const auto &name:names) {
+         const auto marker=name.find("_vert_");if(marker==std::string::npos)continue;
+         auto fragment=name;fragment.replace(marker,6,"_frag_");if(std::find(names.begin(),names.end(),fragment)==names.end())continue;
+         recipes.push_back(descriptor(library,name,fragment,false));
++        recipeVertices.push_back(name);recipeFragments.push_back(fragment);
+     }
+     REQUIRE(recipes.size()==22);
+-    for(const auto *suffix:{"lpf","lph"})recipes.push_back(descriptor(library,std::string("downsample_blur_vert_")+suffix,std::string("narrow_blur_7_frag_")+suffix,true));
++    for(const auto *suffix:{"lpf","lph"}) {
++        recipes.push_back(descriptor(library,std::string("downsample_blur_vert_")+suffix,
++                                     std::string("narrow_blur_7_frag_")+suffix,true));
++        recipeVertices.emplace_back("downsample_blur_vert_"+std::string(suffix));
++        recipeFragments.emplace_back("narrow_blur_7_frag_"+std::string(suffix));
++    }
+     for(const auto &d:recipes)REQUIRE(d.vertex&&d.fragment&&nmb_function_type(d.vertex)==1&&nmb_function_type(d.fragment)==2);
+     NmbBinaryArchive *archive=nmb_binary_archive_new(device,produce?nullptr:archivePath.c_str());REQUIRE(archive);
+     NmbPipelineOptions options={MTLPipelineOptionFailOnBinaryArchiveMiss,&archive,1};
+-    uint64_t coldRequired=0;bool coldObject=false;
++    uint64_t coldRequired=0,coldBatches=0,coldSuccess=0,coldSuppressed=0;bool coldObject=false;
+     if(produce) {
+-        // Exercise the real driver's compile-forbidden cold refusal, separately
+-        // from strict binary-archive misses. Clear only the test policy afterwards.
+-        control(true,false);auto cold=nmb_render_pipeline_new(device,&recipes.back());
++        // Keep the driver's strict result separate from the Metal object return.
++        // The loader labels every resulting Vulkan batch and never fabricates one.
++        uint64_t coldBefore[cacheCounterCount]={};counters(coldBefore);
++        phase("cold",recipes.size()-1);control(true,false);
++        auto cold=nmb_render_pipeline_new(device,&recipes.back());
+         coldObject=cold!=nullptr;if(cold)nmb_render_pipeline_release(cold);
+-        uint64_t counts[10]={};counters(counts);coldRequired=counts[2];REQUIRE(coldRequired>0);control(false,false);
++        uint64_t coldAfter[cacheCounterCount]={};counters(coldAfter);
++        coldRequired=coldAfter[2]-coldBefore[2];
++        coldBatches=coldAfter[12]-coldBefore[12];
++        coldSuccess=coldAfter[1]-coldBefore[1];
++        coldSuppressed=coldAfter[11]-coldBefore[11];
++        control(false,false);
+     }
+-    uint64_t before[10]={};counters(before);unsigned made=0;
+-    for(const auto &d:recipes) {
+-        if(produce)REQUIRE(nmb_binary_archive_add_render(archive,&d));
++    uint64_t before[cacheCounterCount]={};counters(before);unsigned made=0,attempted=0;
++    for(size_t index=0;index<recipes.size();++index) {
++        const auto &d=recipes[index];
++        uint64_t recipeBefore[cacheCounterCount]={};counters(recipeBefore);
++        phase("recipe",index);
++        int archived=2;if(produce)archived=nmb_binary_archive_add_render(archive,&d)?1:0;
+         NmbRenderPipeline *state=nmb_render_pipeline_new_with_options(device,&d,&options);
+-        if(uuid||empty){if(state)nmb_render_pipeline_release(state);break;}
+-        REQUIRE(state);nmb_render_pipeline_release(state);++made;
++        uint64_t recipeAfter[cacheCounterCount]={};counters(recipeAfter);
++        ++attempted;if(state){nmb_render_pipeline_release(state);++made;}
++        std::fprintf(stderr,"QC recipe %s index=%zu vertex=%s fragment=%s made=%u archived=%d "
++            "pipelines=%llu success=%llu required=%llu valid=%llu hits=%llu app_calls=%llu "
++            "app_valid=%llu app_hits=%llu batches=%llu driver_batches=%llu suppressed=%llu\n",
++            argv[3],index,recipeVertices[index].c_str(),recipeFragments[index].c_str(),(unsigned)(state!=nullptr),archived,
++            (unsigned long long)(recipeAfter[0]-recipeBefore[0]),(unsigned long long)(recipeAfter[1]-recipeBefore[1]),
++            (unsigned long long)(recipeAfter[2]-recipeBefore[2]),(unsigned long long)(recipeAfter[3]-recipeBefore[3]),
++            (unsigned long long)(recipeAfter[4]-recipeBefore[4]),(unsigned long long)(recipeAfter[7]-recipeBefore[7]),
++            (unsigned long long)(recipeAfter[8]-recipeBefore[8]),(unsigned long long)(recipeAfter[9]-recipeBefore[9]),
++            (unsigned long long)(recipeAfter[10]-recipeBefore[10]),(unsigned long long)(recipeAfter[12]-recipeBefore[12]),
++            (unsigned long long)(recipeAfter[11]-recipeBefore[11]));
++        if(!state)std::fprintf(stderr,"QC recipe failure index=%zu: %s\n",index,nmb_last_error());
++        if(uuid||empty)break;
+     }
+-    uint64_t counts[10]={};counters(counts);
+-    std::fprintf(stderr,"graphics results %s: calls=%llu success=%llu required=%llu valid=%llu hits=%llu cached=%llu/%llu/%llu\n",argv[3],
++    phase("finalize",0);uint64_t counts[cacheCounterCount]={};counters(counts);
++    std::fprintf(stderr,"graphics results %s: pipelines=%llu success=%llu required=%llu valid=%llu hits=%llu app_cache=%llu/%llu/%llu batches=%llu/%llu/%llu\n",argv[3],
+         (unsigned long long)(counts[0]-before[0]),(unsigned long long)(counts[1]-before[1]),(unsigned long long)(counts[2]-before[2]),
+         (unsigned long long)(counts[3]-before[3]),(unsigned long long)(counts[4]-before[4]),(unsigned long long)(counts[7]-before[7]),
+-        (unsigned long long)(counts[8]-before[8]),(unsigned long long)(counts[9]-before[9]));
+-    if(uuid||empty) {REQUIRE(counts[2]>before[2]);if(uuid)REQUIRE(counts[5]>before[5]);}
+-    else REQUIRE(made==24 && counts[1]>before[1]);
++        (unsigned long long)(counts[8]-before[8]),(unsigned long long)(counts[9]-before[9]),
++        (unsigned long long)(counts[10]-before[10]),(unsigned long long)(counts[11]-before[11]),(unsigned long long)(counts[12]-before[12]));
++    if(uuid||empty) {if(uuid)REQUIRE(counts[5]>0);}
++    else REQUIRE(made==24);
+     if(consume)REQUIRE(counts[2]==before[2] && counts[7]>before[7] && counts[8]-before[8]==counts[7]-before[7] && counts[9]-before[9]==counts[7]-before[7]);
+     if(produce)REQUIRE(nmb_binary_archive_serialize(archive,archivePath.c_str()));
+     NmbShaderCacheStats stats={};REQUIRE(nmb_device_shader_cache_stats(device,&stats));
+     REQUIRE(!stats.rejected&&!stats.read_failures&&!stats.write_failures&&!stats.driver_truncated&&!stats.driver_mismatched);
+     if(consume)REQUIRE(!stats.misses&&!stats.writes&&!stats.driver_misses&&stats.driver_loads);
+     const unsigned initializationSubmissions=submitted()-submissions;
+-    std::printf("PASS: QuartzCore compiler %s pid=%d recipes=%u calls=%llu success=%llu required=%llu valid=%llu hits=%llu uuid_mutations=%llu devices=%llu artifacts=%llu/%llu/%llu driver=%llu/%llu/%llu/%llu cached_calls=%llu/%llu/%llu device_graphics=%llu cold_required=%llu cold_object=%u init_submissions=%u; no shader execution\n",argv[3],getpid(),made,
++    std::printf("PASS: QuartzCore compiler %s pid=%d recipes=%u recipe_ok=%u vulkan_pipelines=%llu vulkan_success=%llu vulkan_required_batches=%llu vulkan_valid=%llu vulkan_hits=%llu vulkan_batches=%llu vulkan_driver_batches=%llu strict_suppressed=%llu app_cache_pipelines=%llu app_cache_valid=%llu app_cache_hits=%llu uuid_mutations=%llu devices=%llu shader_cache=%llu/%llu/%llu driver=%llu/%llu/%llu/%llu device_graphics=%llu cold_driver_required=%llu cold_driver_batches=%llu cold_driver_success=%llu cold_strict_suppressed=%llu cold_object=%u init_submissions=%u; no shader execution\n",argv[3],getpid(),attempted,made,
+         (unsigned long long)(counts[0]-before[0]),(unsigned long long)(counts[1]-before[1]),(unsigned long long)(counts[2]-before[2]),
+-        (unsigned long long)(counts[3]-before[3]),(unsigned long long)(counts[4]-before[4]),(unsigned long long)(counts[5]-before[5]),(unsigned long long)counts[6],
++        (unsigned long long)(counts[3]-before[3]),(unsigned long long)(counts[4]-before[4]),
++        (unsigned long long)(counts[10]-before[10]),(unsigned long long)(counts[12]-before[12]),(unsigned long long)(counts[11]-before[11]),
++        (unsigned long long)(counts[7]-before[7]),(unsigned long long)(counts[8]-before[8]),(unsigned long long)(counts[9]-before[9]),
++        (unsigned long long)counts[5],(unsigned long long)counts[6],
+         (unsigned long long)stats.hits,(unsigned long long)stats.misses,(unsigned long long)stats.writes,
+-        (unsigned long long)stats.driver_loads,(unsigned long long)stats.driver_hits,(unsigned long long)stats.driver_misses,(unsigned long long)stats.driver_saves,(unsigned long long)(counts[7]-before[7]),
+-        (unsigned long long)(counts[8]-before[8]),(unsigned long long)(counts[9]-before[9]),(unsigned long long)deviceCounts[0],(unsigned long long)coldRequired,(unsigned)coldObject,initializationSubmissions);
++        (unsigned long long)stats.driver_loads,(unsigned long long)stats.driver_hits,(unsigned long long)stats.driver_misses,(unsigned long long)stats.driver_saves,
++        (unsigned long long)deviceCounts[0],(unsigned long long)coldRequired,(unsigned long long)coldBatches,(unsigned long long)coldSuccess,
++        (unsigned long long)coldSuppressed,(unsigned)coldObject,initializationSubmissions);
+     nmb_binary_archive_release(archive);for(const auto &d:recipes){nmb_function_release(d.vertex);nmb_function_release(d.fragment);}
+     nmb_library_release(library);nmb_device_release(device);
+     return 0;
+--- graphics_cache_loader.cpp
++++ graphics_cache_loader.cpp
+@@ -3,11 +3,14 @@
+  * its reported cache-control feature and optionally forbidding compilation.
+  * A negative control corrupts only a private copy of a cache UUID. Never deploy. */
+ #include <vulkan/vulkan.h>
++#include <algorithm>
+ #include <atomic>
++#include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
+ #include <dlfcn.h>
+ #include <mutex>
++#include <string>
+ #include <vector>
+ 
+ static PFN_vkGetInstanceProcAddr realInstance;
+@@ -16,8 +19,17 @@
+ static std::atomic<VkInstance> activeInstance;
+ static std::atomic<bool> strict, badUuid;
+ // calls, success, compile-required, valid feedback, whole-cache hit, UUID mutations, devices,
+-// calls with an application cache, their valid feedback and their cache hits
+-static std::atomic<uint64_t> counts[10];
++// calls with an application cache, their valid feedback and their cache hits, wrapper batches,
++// reserved suppression count (must stay zero), and batches that reached the real driver.
++static constexpr unsigned counterCount=13;
++static std::atomic<uint64_t> counts[counterCount];
++static std::mutex phaseMutex;
++static std::string phaseName="init";
++static size_t phaseRecipe=0;
++static void phaseSnapshot(std::string &name,size_t &recipe) {
++    std::lock_guard<std::mutex> lock(phaseMutex);name=phaseName;recipe=phaseRecipe;
++}
++struct PipelineCreateFlags2View {VkStructureType sType;const void *pNext;uint64_t flags;};
+ static void initialize() {
+     std::call_once(initialized,[]{
+         const char *path=std::getenv("NMB_TEST_REAL_VULKAN_LOADER");
+@@ -66,15 +78,24 @@
+ static VKAPI_ATTR VkResult VKAPI_CALL createGraphics(VkDevice device,VkPipelineCache cache,uint32_t count,
+     const VkGraphicsPipelineCreateInfo *infos,const VkAllocationCallbacks *allocator,VkPipeline *pipelines) {
+     if(!count || count>64)return VK_ERROR_INITIALIZATION_FAILED;
++    std::string phase;size_t recipe;phaseSnapshot(phase,recipe);
++    counts[10]++;
++    counts[12]++;
+     std::vector<VkGraphicsPipelineCreateInfo> copies(infos,infos+count);
+     std::vector<VkPipelineCreationFeedback> feedback(count);
+     std::vector<VkPipelineCreationFeedbackCreateInfo> additions(count);
+     std::vector<const VkPipelineCreationFeedback *> observed(count);
++    std::vector<uint64_t> flags2(count);
++    std::vector<uint8_t> flags2Present(count);
+     for(uint32_t i=0;i<count;++i) {
+         if(strict.load())copies[i].flags|=VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT;
+-        for(auto p=static_cast<const VkBaseInStructure *>(copies[i].pNext);p;p=p->pNext)
++        // Inspect flags2 without changing any caller-owned structure or pNext chain.
++        for(auto p=static_cast<const VkBaseInStructure *>(copies[i].pNext);p;p=p->pNext) {
++            if(p->sType==VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO)
++                flags2[i]=reinterpret_cast<const PipelineCreateFlags2View *>(p)->flags,flags2Present[i]=1;
+             if(p->sType==VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO)
+                 observed[i]=reinterpret_cast<const VkPipelineCreationFeedbackCreateInfo *>(p)->pPipelineCreationFeedback;
++        }
+         if(!observed[i]) {
+             auto &a=additions[i];a.sType=VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO;
+             a.pNext=copies[i].pNext;a.pPipelineCreationFeedback=&feedback[i];copies[i].pNext=&a;observed[i]=&feedback[i];
+@@ -83,6 +103,29 @@
+     auto real=reinterpret_cast<PFN_vkCreateGraphicsPipelines>(realDevice.load()(device,"vkCreateGraphicsPipelines"));
+     counts[0]+=count;if(cache)counts[7]+=count;const auto result=real(device,cache,count,copies.data(),allocator,pipelines);
+     if(result==VK_PIPELINE_COMPILE_REQUIRED)counts[2]++;
++    std::string flagList,flags2List,strictList,stageList,libraryList,pipelineList,feedbackList;
++    for(uint32_t i=0;i<count;++i) {
++        const char *separator=i?"|":"";
++        char item[128];
++        const uint64_t effectiveFlags=flags2Present[i]?flags2[i]:copies[i].flags;
++        const bool strictEffective=
++            (effectiveFlags&VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT)!=0;
++        std::snprintf(item,sizeof item,"%s0x%x",separator,copies[i].flags);flagList+=item;
++        std::snprintf(item,sizeof item,"%s0x%llx",separator,(unsigned long long)flags2[i]);flags2List+=item;
++        std::snprintf(item,sizeof item,"%s%d",separator,strictEffective?1:0);strictList+=item;
++        std::snprintf(item,sizeof item,"%s%u",separator,copies[i].stageCount);stageList+=item;
++        std::snprintf(item,sizeof item,"%s%d",separator,
++            (effectiveFlags&VK_PIPELINE_CREATE_LIBRARY_BIT_KHR)?1:0);libraryList+=item;
++        std::snprintf(item,sizeof item,"%s%d",separator,pipelines[i]?1:0);pipelineList+=item;
++        std::snprintf(item,sizeof item,"%s0x%x",separator,observed[i]?observed[i]->flags:0);feedbackList+=item;
++    }
++    const char *resultName=result==VK_SUCCESS?"success":result==VK_PIPELINE_COMPILE_REQUIRED?"compile_required":"other";
++    std::fprintf(stderr,"QC vk phase=%s recipe=%zu flags=%s flags2_present=",phase.c_str(),recipe,flagList.c_str());
++    for(uint32_t i=0;i<count;++i)std::fprintf(stderr,"%s%d",i?"|":"",flags2Present[i]?1:0);
++    std::fprintf(stderr," flags2=%s strict=%s stages=%s libraries=%s cache=%u result=%s result_raw=%d "
++        "pipelines=%s feedback=%s nonnull=%u\n",flags2List.c_str(),strictList.c_str(),stageList.c_str(),libraryList.c_str(),
++        cache?1:0,resultName,result,pipelineList.c_str(),feedbackList.c_str(),
++        [&](){unsigned n=0;for(uint32_t i=0;i<count;++i)n+=pipelines[i]!=VK_NULL_HANDLE;return n;}());
+     for(uint32_t i=0;i<count;++i)if(pipelines[i]) {
+         counts[1]++;
+         if(observed[i] && (observed[i]->flags&VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT)) {
+@@ -111,5 +152,12 @@
+     if(!std::strcmp(name,"vkCreatePipelineCache"))return reinterpret_cast<PFN_vkVoidFunction>(createCache);
+     return realInstance(instance,name);
+ }
+-extern "C" void nmb_test_graphics_cache_control(bool forbidCompilation,bool corruptUuid) {strict=forbidCompilation;badUuid=corruptUuid;}
+-extern "C" void nmb_test_graphics_cache_counts(uint64_t out[10]) {for(unsigned i=0;i<10;++i)out[i]=counts[i].load();}
++extern "C" void nmb_test_graphics_cache_control(bool forbidCompilation,bool corruptUuid) {
++    strict=forbidCompilation;badUuid=corruptUuid;
++}
++extern "C" void nmb_test_graphics_cache_counts(uint64_t out[counterCount]) {
++    for(unsigned i=0;i<counterCount;++i)out[i]=counts[i].load();
++}
++extern "C" void nmb_test_graphics_cache_phase(const char *name,size_t recipe) {
++    std::lock_guard<std::mutex> lock(phaseMutex);phaseName=name?name:"unknown";phaseRecipe=recipe;
++}

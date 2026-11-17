@@ -1,0 +1,119 @@
+diff --git a/NativeTurnipSmoke.h b/NativeTurnipSmoke.h
+--- a/NativeTurnipSmoke.h
++++ b/NativeTurnipSmoke.h
+@@ -22,7 +22,8 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+ #include <unistd.h>
++#include "NativeTurnipWatchdog.h"
+ 
+ // Vulkan create-info structs are written as {sType} with every other member zero.
+ #pragma clang diagnostic push
+@@ -609,36 +610,48 @@
+     thread_resume(thread);
+ }
+ 
+-template <typename Marker, typename Reporter>
+-static Result runWatched(Marker &mark, Reporter &&report, const char *libraryPath) {
++struct NoopWatchdogPollReport {
++    void operator()(int64_t, unsigned) const {}
++};
++
++template <typename Marker, typename Reporter, typename PollReporter>
++static Result runWatchedDetailed(Marker &mark, Reporter &&report, const char *libraryPath, PollReporter &&pollReport) {
+     Watched *w = new Watched{};
+     w->libraryPath = libraryPath;
+     w->markContext = &mark;
+     w->mark = [](void *context, uint32_t value) { (*static_cast<Marker *>(context))(value); };
+     pthread_attr_t attr;
+     pthread_attr_init(&attr);
+     pthread_attr_setstacksize(&attr, 8u << 20);   // Mesa's NIR/ir3 passes recurse; the default 512 KiB secondary stack is small
+     pthread_t worker;
++    const auto watchdogStarted = watchdog::Clock::now();
+     const bool started = pthread_create(&worker, &attr, watchedWorker, w) == 0;
+     pthread_attr_destroy(&attr);
+-    if (!started) {Result r; r.stage = 0; r.vkResult = -12; return r;}
+-    static const unsigned checkpoints[] = {15, 45, 90};
+-    unsigned next = 0;
+-    for (unsigned tenths = 0; !__atomic_load_n(&w->done, __ATOMIC_ACQUIRE); ++tenths) {
+-        usleep(100000);
+-        if (next < 3 && tenths == checkpoints[next] * 10) {
++    if (!started) {delete w; Result r; r.stage = 0; r.vkResult = -12; return r;}
++    watchdog::Schedule schedule;
++    unsigned polls = 0;
++    while (!__atomic_load_n(&w->done, __ATOMIC_ACQUIRE)) {
++        const auto now = watchdog::Clock::now();
++        ++polls;
++        pollReport(std::chrono::duration_cast<std::chrono::milliseconds>(now - watchdogStarted).count(), polls);
++        schedule.poll(watchdogStarted, now, [w] { return __atomic_load_n(&w->done, __ATOMIC_ACQUIRE) != 0; }, [&](unsigned) {
+             char text[64] = {};
+             sample(*w, worker, text, sizeof text);
+             report(text);
+-            ++next;
+-        }
++        });
++        if (!__atomic_load_n(&w->done, __ATOMIC_ACQUIRE)) usleep(100000);
+     }
+     pthread_join(worker, nullptr);
+     Result result = w->result;
+     delete w;
+     return result;
+ }
+ 
++template <typename Marker, typename Reporter>
++static Result runWatched(Marker &mark, Reporter &&report, const char *libraryPath) {
++    return runWatchedDetailed(mark, report, libraryPath, NoopWatchdogPollReport{});
++}
++
+ // Path of libvulkan_freedreno.dylib: next to the image this code is part of (the plugin binary inside the bundle).
+ static bool libraryPath(char *path, size_t size) {
+     Dl_info info = {};
+diff --git a/NativeTurnipWatchdog.h b/NativeTurnipWatchdog.h
+new file mode 100644
+--- /dev/null
++++ b/NativeTurnipWatchdog.h
+@@ -0,0 +1,43 @@
++// SPDX-License-Identifier: MIT
++// Shared real-time watchdog policy for the shipping Turnip smoke test and its host regression.
++#pragma once
++
++#include <chrono>
++#include <cstddef>
++
++namespace turnip::watchdog {
++
++using Clock = std::chrono::steady_clock;
++inline constexpr unsigned kCheckpointsSeconds[] = {15, 45, 90};
++inline constexpr auto kPollInterval = std::chrono::milliseconds(100);
++
++class Schedule {
++public:
++    bool due(Clock::time_point started, Clock::time_point now) const {
++        return next_ < sizeof kCheckpointsSeconds / sizeof kCheckpointsSeconds[0] &&
++            now - started >= std::chrono::seconds(kCheckpointsSeconds[next_]);
++    }
++
++    unsigned nextCheckpointSeconds() const {
++        return next_ < sizeof kCheckpointsSeconds / sizeof kCheckpointsSeconds[0] ? kCheckpointsSeconds[next_] : 0;
++    }
++
++    bool complete() const {
++        return next_ >= sizeof kCheckpointsSeconds / sizeof kCheckpointsSeconds[0];
++    }
++
++    // One poll consumes at most one checkpoint. A late poll therefore reports
++    // each overdue checkpoint exactly once and in order on subsequent polls.
++    template <typename Done, typename Sample>
++    bool poll(Clock::time_point started, Clock::time_point now, Done &&done, Sample &&sample) {
++        if (done() || !due(started, now)) return false;
++        sample(nextCheckpointSeconds());
++        ++next_;
++        return true;
++    }
++
++private:
++    std::size_t next_ = 0;
++};
++
++}  // namespace turnip::watchdog

@@ -92,8 +92,16 @@ def main():
                     print('mkdir', d.relative_to(mount))
         finally:
             subprocess.run(['hdiutil', 'detach', device], check=True)
-        if raw.read_bytes()[32:36] != b'NXSB':
-            sys.exit('The edited image is no APFS container any more')
+        raw_bytes = raw.read_bytes()
+        nxsb = raw_bytes.find(b'NXSB')
+        # Packed seeds can place the APFS container after the DBRDISK header.
+        # NXSB is then at 0x20 plus a multiple of 4096, not always at raw+0x20.
+        if nxsb < 0 or nxsb < 0x20 or (nxsb - 0x20) % 4096:
+            sys.exit(
+                'The edited image is no APFS container any more '
+                f'(NXSB offset={nxsb:#x})'
+            )
+        print(f'APFS NXSB offset: {nxsb:#x}')
         metadata = packed_ramdisk.pack(raw, output)
     report = dict(base_sha256=packed_ramdisk.inspect(base)[0]['sha256'], output=metadata,
                   preferences=['com.apple.migration', 'com.apple.springboard', 'com.apple.purplebuddy',
